@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"net"
 	"time"
 
@@ -59,6 +60,7 @@ func runForward(cmd *cobra.Command, args []string) {
 		return
 	}
 	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	connRef := &conn
 	if err != nil {
 		log.Sugar().Errorw("DialTCP failed", "host", host, "error", err)
 		return
@@ -86,7 +88,7 @@ func runForward(cmd *cobra.Command, args []string) {
 			pkt = append(pkt, b...)
 
 			cleanUp := func() {
-				clear(pkt)
+				pkt = make([]byte, 0)
 			}
 
 			// send the packet if it ends with 0x1c0d
@@ -100,7 +102,7 @@ func runForward(cmd *cobra.Command, args []string) {
 
 			if isExpectedEnds() {
 				log.Sugar().Debugw("Serial port to TCP", "n", len(pkt), "data", string(pkt))
-				_, err = conn.Write(pkt)
+				_, err = (*connRef).Write(pkt)
 				if err != nil {
 					log.Sugar().Error(err)
 					cleanUp()
@@ -114,11 +116,31 @@ func runForward(cmd *cobra.Command, args []string) {
 
 	connToSp := func() {
 		buf := make([]byte, 2048)
-		for {
-			n, err := conn.Read(buf)
+		tryToReconnect := func() (*net.TCPConn, error) {
+			conn, err := net.DialTCP("tcp", nil, tcpAddr)
 			if err != nil {
-				log.Sugar().Error(err)
-				continue
+				log.Sugar().Errorw("failed to reconnect", "addr", tcpAddr, "error", err)
+				time.Sleep(1 * time.Second)
+			} else {
+				log.Sugar().Infow("reconnected to the server", "addr", tcpAddr)
+			}
+			return conn, err
+		}
+
+		for {
+			n, err := (*connRef).Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					tmpConn, tErr := tryToReconnect()
+					if tErr != nil {
+						continue
+					} else {
+						*connRef = tmpConn
+					}
+				} else {
+					log.Sugar().Error(err)
+					continue
+				}
 			}
 			if n == 0 {
 				continue
