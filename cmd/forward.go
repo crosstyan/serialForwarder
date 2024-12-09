@@ -31,6 +31,7 @@ func runForward(cmd *cobra.Command, args []string) {
 	}
 	serialPortPath = args[0]
 	log.Sugar().Infow("Input arguments", "serial_port", serialPortPath, "host", host, "baudrate", baudRate)
+
 	// TODO: custom other than 8N1
 	mode := serial.Mode{
 		BaudRate: baudRate,
@@ -59,21 +60,30 @@ func runForward(cmd *cobra.Command, args []string) {
 		log.Sugar().Errorw("ResolveTCPAddr failed", "host", host, "error", err)
 		return
 	}
-	conn, err := net.DialTCP("tcp", nil, tcpAddr)
-	connRef := &conn
+	tConn, err := net.DialTCP("tcp", nil, tcpAddr)
+	connRef := &tConn
 	if err != nil {
 		log.Sugar().Errorw("DialTCP failed", "host", host, "error", err)
 		return
 	}
-	// TODO: find out the delimiter
-	// https://docs.oracle.com/cd/E19509-01/820-5508/ghadt/index.html
-	// https://docs.mulesoft.com/hl7-mllp-connector/latest/hl7-mllp-connector-examples
-	// https://stackoverflow.com/questions/23988299/tcp-hl7-message-has-period-as-segment-terminator
-	// https://learn.microsoft.com/en-us/biztalk/adapters-and-accelerators/accelerator-hl7/message-delimiters?redirectedfrom=MSDN
-	// https://learn.microsoft.com/en-us/biztalk/adapters-and-accelerators/accelerator-hl7/processing-hl7-messages?redirectedfrom=MSDN
+
 	spToConn := func() {
 		pkt := make([]byte, 0)
 		tmp := make([]byte, 1024)
+
+		cleanUp := func() {
+			pkt = make([]byte, 0)
+		}
+
+		// send the packet if it ends with 0x1c0d
+		isExpectedEnds := func() bool {
+			if len(pkt) < 2 {
+				return false
+			}
+			l := len(pkt)
+			return pkt[l-2] == 0x1c && pkt[l-1] == 0x0d
+		}
+
 		for {
 			n, err := sp.Read(tmp)
 			if err != nil {
@@ -87,34 +97,19 @@ func runForward(cmd *cobra.Command, args []string) {
 			b := tmp[:n]
 			pkt = append(pkt, b...)
 
-			cleanUp := func() {
-				pkt = make([]byte, 0)
-			}
-
-			// send the packet if it ends with 0x1c0d
-			isExpectedEnds := func() bool {
-				if len(pkt) < 2 {
-					return false
-				}
-				l := len(pkt)
-				return pkt[l-2] == 0x1c && pkt[l-1] == 0x0d
-			}
-
 			if isExpectedEnds() {
 				log.Sugar().Debugw("Serial port to TCP", "n", len(pkt), "data", string(pkt))
 				_, err = (*connRef).Write(pkt)
 				if err != nil {
 					log.Sugar().Error(err)
-					cleanUp()
-					continue
-				} else {
-					cleanUp()
 				}
+				cleanUp()
 			}
 		}
 	}
 
 	connToSp := func() {
+		var isReconnecting bool = false
 		buf := make([]byte, 2048)
 		tryToReconnect := func() (*net.TCPConn, error) {
 			conn, err := net.DialTCP("tcp", nil, tcpAddr)
@@ -122,18 +117,25 @@ func runForward(cmd *cobra.Command, args []string) {
 		}
 
 		for {
+			if isReconnecting {
+				time.Sleep(1 * time.Second)
+				tmpConn, tErr := tryToReconnect()
+				if tErr != nil {
+					log.Sugar().Warnw("failed to reconnect", "addr", tcpAddr, "error", tErr)
+					isReconnecting = true
+					continue
+				} else {
+					log.Sugar().Infow("reconnected to the server", "addr", tcpAddr)
+					*connRef = tmpConn
+					isReconnecting = false
+				}
+			}
+
 			n, err := (*connRef).Read(buf)
 			if err != nil {
 				if err == io.EOF {
-					time.Sleep(1 * time.Second)
-					tmpConn, tErr := tryToReconnect()
-					if tErr != nil {
-						log.Sugar().Warnw("failed to reconnect", "addr", tcpAddr, "error", tErr)
-						continue
-					} else {
-						log.Sugar().Infow("reconnected to the server", "addr", tcpAddr)
-						*connRef = tmpConn
-					}
+					isReconnecting = true
+					continue
 				} else {
 					log.Sugar().Error(err)
 					continue
@@ -142,12 +144,14 @@ func runForward(cmd *cobra.Command, args []string) {
 			if n == 0 {
 				continue
 			}
+
 			b := buf[:n]
 			log.Sugar().Debugw("TCP to serial port", "n", n, "data", string(b))
 			_, err = sp.Write(b)
 			if err != nil {
 				log.Sugar().Error(err)
-				return
+				isReconnecting = true
+				continue
 			}
 		}
 	}
