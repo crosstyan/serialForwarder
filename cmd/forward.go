@@ -71,7 +71,7 @@ func runForward(cmd *cobra.Command, args []string) {
 		pkt := make([]byte, 0)
 		tmp := make([]byte, 1024)
 
-		cleanUp := func() {
+		reset := func() {
 			pkt = make([]byte, 0)
 		}
 
@@ -103,7 +103,7 @@ func runForward(cmd *cobra.Command, args []string) {
 				if err != nil {
 					log.Sugar().Error(err)
 				}
-				cleanUp()
+				reset()
 			}
 		}
 	}
@@ -111,15 +111,11 @@ func runForward(cmd *cobra.Command, args []string) {
 	connToSp := func() {
 		var isReconnecting bool = false
 		buf := make([]byte, 2048)
-		tryToReconnect := func() (*net.TCPConn, error) {
-			conn, err := net.DialTCP("tcp", nil, tcpAddr)
-			return conn, err
-		}
 
 		for {
 			if isReconnecting {
 				time.Sleep(1 * time.Second)
-				tmpConn, tErr := tryToReconnect()
+				tmpConn, tErr := net.DialTCP("tcp", nil, tcpAddr)
 				if tErr != nil {
 					log.Sugar().Warnw("failed to reconnect", "addr", tcpAddr, "error", tErr)
 					isReconnecting = true
