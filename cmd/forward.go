@@ -1,11 +1,12 @@
 package cmd
 
 import (
+	"net"
+	"time"
+
 	"github.com/crosstyan/serialForwarder/log"
 	"github.com/spf13/cobra"
 	"go.bug.st/serial"
-	"net"
-	"time"
 )
 
 const hostFlagName = "host"
@@ -69,30 +70,58 @@ func runForward(cmd *cobra.Command, args []string) {
 	// https://learn.microsoft.com/en-us/biztalk/adapters-and-accelerators/accelerator-hl7/message-delimiters?redirectedfrom=MSDN
 	// https://learn.microsoft.com/en-us/biztalk/adapters-and-accelerators/accelerator-hl7/processing-hl7-messages?redirectedfrom=MSDN
 	spToConn := func() {
-		buf := make([]byte, 1024)
+		pkt := make([]byte, 0)
+		tmp := make([]byte, 1024)
 		for {
-			n, err := sp.Read(buf)
+			n, err := sp.Read(tmp)
 			if err != nil {
 				log.Sugar().Error(err)
-				return
+				continue
 			}
-			b := buf[:n]
-			// TODO: string to hex
-			log.Sugar().Debugw("Serial port to TCP", "n", n, "data", string(b))
-			_, err = conn.Write(b)
-			if err != nil {
-				log.Sugar().Error(err)
-				return
+			if n == 0 {
+				continue
+			}
+
+			b := tmp[:n]
+			pkt = append(pkt, b...)
+
+			cleanUp := func() {
+				clear(pkt)
+			}
+
+			// send the packet if it ends with 0x1c0d
+			isExpectedEnds := func() bool {
+				if len(pkt) < 2 {
+					return false
+				}
+				l := len(pkt)
+				return pkt[l-2] == 0x1c && pkt[l-1] == 0x0d
+			}
+
+			if isExpectedEnds() {
+				log.Sugar().Debugw("Serial port to TCP", "n", len(pkt), "data", string(pkt))
+				_, err = conn.Write(pkt)
+				if err != nil {
+					log.Sugar().Error(err)
+					cleanUp()
+					continue
+				} else {
+					cleanUp()
+				}
 			}
 		}
 	}
+
 	connToSp := func() {
-		buf := make([]byte, 1024)
+		buf := make([]byte, 2048)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				log.Sugar().Error(err)
-				return
+				continue
+			}
+			if n == 0 {
+				continue
 			}
 			b := buf[:n]
 			log.Sugar().Debugw("TCP to serial port", "n", n, "data", string(b))
