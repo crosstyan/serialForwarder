@@ -118,12 +118,6 @@ func runForward(cmd *cobra.Command, args []string) {
 		buf := make([]byte, 2048)
 		tryToReconnect := func() (*net.TCPConn, error) {
 			conn, err := net.DialTCP("tcp", nil, tcpAddr)
-			if err != nil {
-				log.Sugar().Warnw("failed to reconnect", "addr", tcpAddr, "error", err)
-				time.Sleep(1 * time.Second)
-			} else {
-				log.Sugar().Infow("reconnected to the server", "addr", tcpAddr)
-			}
 			return conn, err
 		}
 
@@ -131,10 +125,13 @@ func runForward(cmd *cobra.Command, args []string) {
 			n, err := (*connRef).Read(buf)
 			if err != nil {
 				if err == io.EOF {
+					time.Sleep(1 * time.Second)
 					tmpConn, tErr := tryToReconnect()
 					if tErr != nil {
+						log.Sugar().Errorw("failed to reconnect", "addr", tcpAddr, "error", tErr)
 						continue
 					} else {
+						log.Sugar().Infow("reconnected to the server", "addr", tcpAddr)
 						*connRef = tmpConn
 					}
 				} else {
